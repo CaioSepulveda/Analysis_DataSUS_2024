@@ -101,7 +101,7 @@ Suppliers are ranked by their average unit price for each specific medication, a
 
 ## 5. Dashboard Overview (Looker Studio)
 
-The Looker Studio dashboard is designed with two main pages to provide comprehensive insights and utility.
+The Looker Studio dashboard is designed with two main pages to provide comprehensive insights and utility. You can see it clicking [Here](https://lookerstudio.google.com/reporting/113221bc-cc17-4a99-b9b7-fcf0e0e6ac0e)
 
 ### Page 1: Procurement Efficiency Report
 
