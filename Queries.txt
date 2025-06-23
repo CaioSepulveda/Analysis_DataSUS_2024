@@ -1,0 +1,192 @@
+1
+-- This query creates a new table containing a cleaned version of the `Descrição CATMAT` column.
+--
+-- **Purpose of Cleaning (Creation of the Collum "Medicamento"):**
+-- The original `Descrição CATMAT` column contained "dirty" data, including:
+-- 1.  HTML entities (e.g., `&#211;` for `Ó`, `&#160;` for non-breaking space)
+-- 2.  HTML tags (e.g., `<DIV>`, `<SPAN>`)
+-- 3.  Excessive whitespace (multiple spaces, leading/trailing spaces)
+-- 4. The name `Descrição CATMAT` makes the queries harder to Write
+--
+-- **Why it was necessary:**
+-- These inconsistencies make the medication names difficult to read,
+-- unreliable for accurate analysis (e.g., grouping, distinct counts),
+-- and problematic for comparisons or joining with other datasets.
+-- Cleaning ensures data integrity, improves readability, and enables more precise analytical queries.
+
+CREATE OR REPLACE TABLE `data-glow-up-45.datasus_2024.2024_clean_refined` AS
+SELECT
+
+  *, 
+    REGEXP_REPLACE(
+      REGEXP_REPLACE(
+        REPLACE(
+          REPLACE(
+            REPLACE(
+              REPLACE(
+                REPLACE(
+                  REPLACE(
+                    `Descrição CATMAT`,
+                    '&#211;', 'Ó'
+                  ),
+                  '&#205;', 'Í'
+                ),
+                '&#193;', 'Á'
+              ),
+              '&#201;', 'É'
+            ),
+            '&#195;', 'Ã'
+          ),
+          '&#160;', ' '
+        ),
+        r'<[^>]+>', ''
+      ),
+      r'\s+', ' '
+    )
+   AS Medicamento
+FROM
+  `data-glow-up-45.datasus_2024.2024_clean`;
+
+
+
+2
+-- This query transform data to create the final table, tha will be used in the dashboard
+
+#Criar as estatísticas de primeiro, segundo e terceiro Quartil de Preço e Quantidade de Itens Comprados
+
+CREATE OR REPLACE TABLE `data-glow-up-45.datasus_2024.2024_final_dashboard` AS
+
+WITH stats AS (
+  SELECT 
+    `Descrição CATMAT`,
+    Compra,
+    Medicamento , 
+    `Modalidade da Compra`, 
+    UF,
+    Fornecedor,
+    `Preço Unitário`, 
+    `Preço Total` , 
+    `Qtd Itens Comprados`,
+     PERCENTILE_CONT(`Qtd Itens Comprados`, 0.25) OVER (PARTITION BY `Descrição CATMAT`) AS qtd_Q1,
+     PERCENTILE_CONT(`Qtd Itens Comprados`, 0.5) OVER (PARTITION BY `Descrição CATMAT`) AS qtd_Q2 , 
+   PERCENTILE_CONT(`Qtd Itens Comprados`, 0.75) OVER (PARTITION BY `Descrição CATMAT`) AS qtd_Q3, 
+    PERCENTILE_CONT(`Preço Unitário`, 0.25) OVER (PARTITION BY `Descrição CATMAT`)
+AS price_Q1,
+      PERCENTILE_CONT(`Preço Unitário`, 0.5) OVER (PARTITION BY `Descrição CATMAT`)
+AS price_Q2,
+     PERCENTILE_CONT(`Preço Unitário`, 0.75) OVER (PARTITION BY `Descrição CATMAT`)
+AS price_Q3
+  FROM `data-glow-up-45.datasus_2024.2024_clean_refined`
+ 
+),
+#Defining Price and Quantity Upper Bound
+limits AS (
+  SELECT 
+    `Descrição CATMAT`,
+    Medicamento, 
+    Compra, 
+    `Modalidade da Compra` ,
+     Fornecedor,
+     UF, 
+    `Preço Unitário` , 
+     `Preço Total` , 
+    `Qtd Itens Comprados`,
+    qtd_Q1, 
+    qtd_Q2 , 
+    qtd_Q3,
+    (qtd_Q3 + 1.5 * (qtd_Q3 - qtd_Q1)) AS qtd_upper_bound,
+
+   price_Q1,
+   price_Q2, 
+    price_Q3,
+    (price_Q3 - price_Q1) AS price_IQR,
+    (price_Q1 - 1.5 * (price_Q3 - price_Q1)) AS lower_bound,
+    (price_Q3 + 1.5 * (price_Q3 - price_Q1)) AS price_upper_bound
+  FROM stats
+)
+
+SELECT 
+  `Descrição CATMAT`,
+  UF, 
+  Compra , 
+  Medicamento , 
+   `Preço Total` AS Preco_Total ,
+  `Modalidade da Compra` AS Modalidade_De_Compra, 
+
+     Fornecedor,
+    `Preço Unitário` AS Preco_Unitario ,
+    price_upper_bound, 
+    price_Q2, 
+    `Qtd Itens Comprados` AS Qtd_Itens_Comprados , 
+    qtd_upper_bound, 
+    qtd_Q2, 
+   CASE WHEN (`Preço Unitário` > price_upper_bound 
+   AND `Qtd Itens Comprados` > qtd_upper_bound)
+  THEN (`Qtd Itens Comprados` - qtd_Q2) * (`Preço Unitário` - price_Q2) ELSE NULL END AS Gasto_Em_Excesso, #Quantity above median times price above median to measure the excess spent 
+   CASE 
+  WHEN (`Preço Unitário` > price_upper_bound 
+   AND `Qtd Itens Comprados` > qtd_upper_bound)
+  THEN 'Sim' ELSE 'Não'  
+END AS Possui_Excesso #Creates boolean collum that defines if there's excess spent
+
+    FROM
+  limits
+
+
+ORDER BY 
+`Gasto_em_Excesso` DESC 
+
+
+
+3 
+#Create a ranking of the best Supplier by Product
+
+-- Query Explanation:
+--
+-- WITH SupplierAvgPrice AS (...):
+--   Calculates the average unit price for each medication-supplier combination.
+--
+-- WITH RankedSuppliers AS (...):
+--   Assigns a rank to each supplier per medication, based on the lowest average price.
+--   ROW_NUMBER() ensures a single "best" supplier even in case of a price tie.
+--
+-- Main Query (SELECT ... FROM ... WHERE `Rank` = 1):
+--   Selects the medication, the supplier with the lowest average price, and its price.
+--   Filters to show only the supplier with Rank 1 (the best).
+--  Orders the results by medication for better readability.
+
+CREATE OR REPLACE TABLE `data-glow-up-45.datasus_2024.Suppliers_Ranking` AS 
+WITH SupplierAvgPrice AS (
+  SELECT
+    Medicamento,
+    Fornecedor,
+    ROUND(AVG(`Preço Unitário`), 2) AS Preco_Unitario_Medio
+  FROM
+    `data-glow-up-45.datasus_2024.2024_clean_refined`
+  GROUP BY
+    Medicamento,
+    Fornecedor
+),
+RankedSuppliers AS (
+  SELECT
+    Medicamento,
+    Fornecedor,
+   Preco_Unitario_Medio ,
+    ROW_NUMBER() OVER (PARTITION BY  Medicamento ORDER BY Preco_Unitario_Medio ASC) AS `Rank`
+  FROM
+    SupplierAvgPrice
+)
+SELECT
+   Medicamento,
+  Fornecedor,
+  Preco_Unitario_Medio
+FROM
+  RankedSuppliers
+WHERE
+  `Rank` = 1
+ORDER BY
+   Medicamento;
+
+
+
+
